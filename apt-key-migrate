@@ -1,66 +1,103 @@
 #!/usr/bin/env bash
-set -o errexit
-set -o nounset
 
+## Uncomment for debugging purpose
+# set -o errexit
+# set -o pipefail
+# set -o nounset
+# set -o xtrace
+
+# Keyring to migrate from
 keys_from='/etc/apt/trusted.gpg'
-keys_to='/etc/apt/trusted.gpg.d'
-
-function errorexit() {
-	trap - ERR
-	printf "Error on line %s\n" "$(caller)"
-	exit 1
-}
-trap errorexit ERR
+# Where to put migrated keys
+keys_to='/usr/share/keyrings'
+# APT lists folder
+apt_sources_dir='/etc/apt/sources.list.d'
 
 if [[ ! -s "${keys_from}" ]]
 then
-	printf "Nothing to do, %s not found. Good job!\n" "${keys_from}"
-	exit 0
+  printf "Nothing to do, %s not found. Good job!\n" "${keys_from}"
+  exit 0
 fi
 
 # Backup the old keyring
 printf -v keys_from_bak "%s.%(%Y%m%d%H%M%S)T.save" "${keys_from}" -1
 cp -v "${keys_from}" "${keys_from_bak}"
 
-# Get a list of key ids in trusted.gpg
+# Get a list of key ids in /etc/apt/trusted.gpg
 declare -a keyids
 while IFS=':' read -r -a fields
 do
-	if [[ "${fields[0]}" == "pub" ]]
-	then
-		keyids+=("${fields[4]}")
-	fi
+  if [[ "${fields[0]}" == "pub" ]]
+  then
+    keyids+=("${fields[4]}")
+  fi
 done < <(gpg --no-default-keyring --keyring "${keys_from}" --list-keys --with-colons)
 
 # Match names to the key ids
 declare -A names
 for keyid in "${keyids[@]}"
 do
-	while IFS=':' read -r -a fields
-	do
-		if [[ "${fields[0]}" == "uid" ]]
-		then
-			names["${keyid}"]="${fields[9]//[^.a-zA-Z0-9@-]/_}"
-        	fi
-	done < <(gpg --no-default-keyring --keyring "${keys_from}" --list-keys --with-colons "${keyid}")
+  while IFS=':' read -r -a fields
+  do
+    if [[ "${fields[0]}" == "uid" ]]
+    then
+      names["${keyid}"]="${fields[9]//[^.a-zA-Z0-9@-]/_}"
+    fi
+  done < <(gpg --no-default-keyring --keyring "${keys_from}" --list-keys --with-colons "${keyid}")
 done
 
-# Generate distinct keyrings and delete from trusted.gpg
+# Generate distinct keyrings and delete from /etc/apt/trusted.gpg
 for keyid in "${keyids[@]}"
 do
-	unset keyring
-	unset key
-	printf -v keyring "%s/%s-%s.gpg" "${keys_to}" "${keyid}" "${names["${keyid}"]}"
-	printf "%s -> %s\n" "${keyid}" "${keyring}"
-	touch "${keyring}"
-	key="$(gpg --no-default-keyring --keyring "${keys_from}" --export --armor "${keyid}")"
-	if gpg --no-default-keyring --trust-model always --keyring "${keyring}" --import <<< "${key}"
-	then
-		apt-key --keyring "${keys_from}" del "${keyid}"
-		rm -f -v "${keyring}~"
-	fi
+  unset keyring
+  unset key
+  # Get part of domain in email after @ and before .com, use that as name for source file
+  name=$(echo "${names["${keyid}"]}" | grep -oP '(?<=[@])\w+(?=[.])')
+  # echo "$name"-archive-keyring
+  printf -v keyring "%s/%s.gpg" "${keys_to}" "$name-archive-keyring"
+  printf "%s -> %s\n" "${keyid}" "${keyring}"
+  touch "${keyring}"
+  key="$(gpg --no-default-keyring --keyring "${keys_from}" --export --armor "${keyid}")"
+  if gpg --no-default-keyring --trust-model always --keyring "${keyring}" --import <<< "${key}"
+  then
+    echo "Successfully migrated key"
+    # Check if source file exists with name.list
+    sources_list=$(grep -Ril --exclude="*.save" "$name" $apt_sources_dir)
+    # Check name.list if signed-by= already exists
+    file_check=$(grep -c "signed-by=" "$sources_list")
+    # If file and $name.list exists
+    if [[ -f "$sources_list" && "$sources_list" == *"$name.list"* ]]
+    then
+      # And signed-by= is not added
+      if [ "$file_check" -eq 0 ]
+      then
+        # Add the repo key to "/etc/apt/sources.list.d/name.list"
+        echo "Adding the following line to $apt_sources_dir/$name.list"
+        echo "[signed-by=$keys_to/$name-archive-keyring.gpg"
+        sed -i  "s|deb http|deb [signed-by=$keys_to/$name-archive-keyring.gpg] http|g" "$sources_list"
+        echo "Success!"
+      else
+        echo "signed-by already exists in $sources_list... Skipping"
+        exit 1
+      fi
+    else
+      echo "$sources_list doesn't exist... Skipping"
+      exit 1
+    fi
+  fi
 done
 
-# Still here and not errorexited? Remove trusted.gpg
-rm -f -v /etc/apt/trusted.gpg
-rm -f -v /etc/apt/trusted.gpg~
+# Still here and not errorexited? Ask user to remove /etc/apt/trusted.gpg
+echo -e "Do you want to delete $keys_from [Y/N?]"
+read -p "" -n 1 -r
+echo -e "\n"
+if [[ $REPLY =~ ^[Yy]$ ]]
+then
+  rm -f -v /etc/apt/trusted.gpg
+  rm -f -v /etc/apt/trusted.gpg~
+fi
+if [[ $REPLY =~ ^[Nn]$ ]]
+then
+  exit 1
+fi
+exit
