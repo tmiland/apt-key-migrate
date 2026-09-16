@@ -1,4 +1,6 @@
 # apt-key-migrate
+[![Sponsor @tmiland](https://img.shields.io/badge/Sponsor-%40tmiland-ea4aaa?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/tmiland)
+
 
 ## Service for converting /etc/apt/trusted.gpg into individual keyrings in /usr/share/keyrings
 
